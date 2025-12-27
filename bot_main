@@ -1,0 +1,322 @@
+import asyncio
+import aiohttp
+from datetime import datetime
+from io import BytesIO
+
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command, CommandStart
+from aiogram.types import Message, CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+
+from config import config, logger
+from database import db
+
+# Проверяем доступность PIL
+PIL_AVAILABLE = False
+try:
+    from PIL import Image, ImageFilter, ImageDraw, ImageFont
+    PIL_AVAILABLE = True
+    logger.info("✅ PIL/Pillow доступен для обработки изображений")
+except ImportError as e:
+    logger.warning(f"⚠️ PIL не установлен: {e}")
+
+# Проверяем доступность GigaChat
+GIGACHAT_AVAILABLE = False
+gigachat_client = None
+try:
+    from gigachat import GigaChat
+    from gigachat.models import Chat, Messages, MessagesRole
+    GIGACHAT_AVAILABLE = True
+    
+    if config.GIGACHAT_CLIENT_ID and config.GIGACHAT_SECRET:
+        try:
+            gigachat_client = GigaChat(
+                credentials=config.GIGACHAT_SECRET,
+                scope=config.GIGACHAT_CLIENT_ID,
+                verify_ssl_certs=False
+            )
+            logger.info("✅ GigaChat клиент инициализирован")
+        except Exception as e:
+            logger.error(f"❌ Ошибка инициализации GigaChat: {e}")
+    else:
+        logger.warning("⚠️ GigaChat не настроен (отсутствуют CLIENT_ID или SECRET)")
+except ImportError as e:
+    logger.warning(f"⚠️ GigaChat не установлен: {e}")
+
+# ========== ИНИЦИАЛИЗАЦИЯ ==========
+bot = Bot(token=config.TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+
+# ========== STATES (FSM) ==========
+class PostStates(StatesGroup):
+    waiting_for_topic = State()
+
+class EventStates(StatesGroup):
+    waiting_for_title = State()
+    waiting_for_description = State()
+    waiting_for_date = State()
+
+# ========== MIDDLEWARE ==========
+async def check_access_middleware(handler, event: Message, data: dict):
+    """Проверка доступа пользователя"""
+    if not event.from_user:
+        return await handler(event, data)
+    
+    username = event.from_user.username or str(event.from_user.id)
+    
+    # Админы всегда имеют доступ
+    if event.from_user.id in config.ADMIN_IDS:
+        logger.debug(f"Доступ разрешен для администратора {username}")
+        return await handler(event, data)
+    
+    # Проверка whitelist
+    if db.is_whitelisted(username):
+        logger.debug(f"Доступ разрешен для пользователя {username}")
+        return await handler(event, data)
+    else:
+        logger.warning(f"Доступ запрещен для пользователя {username}")
+        await event.answer("⛔ У вас нет доступа к боту. Обратитесь к администратору.")
+        return
+
+# Регистрируем middleware
+dp.message.middleware.register(check_access_middleware)
+
+# ========== КОМАНДЫ ==========
+@dp.message(CommandStart())
+async def start_command(message: Message):
+    """Обработка команды /start"""
+    welcome_text = """
+🤖 Добро пожаловать в бот!
+
+Доступные команды:
+/admin - админ-панель
+/add user @username - добавить пользователя
+/generate_post - создать пост через AI
+/events - список мероприятий
+/add_event - добавить мероприятие
+/media - поиск в базе СМИ
+/help - помощь
+
+Отправьте фото для обработки с логотипом!
+"""
+    await message.answer(welcome_text)
+
+@dp.message(Command("help"))
+async def help_command(message: Message):
+    """Команда помощи"""
+    await start_command(message)
+
+@dp.message(Command("admin"))
+async def admin_panel(message: Message):
+    """Админ-панель"""
+    if message.from_user.id not in config.ADMIN_IDS:
+        await message.answer("⛔ Только для администраторов")
+        return
+    
+    keyboard = [
+        [types.InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+        [types.InlineKeyboardButton(text="📝 Управление событиями", callback_data="admin_events")],
+        [types.InlineKeyboardButton(text="🔄 Перезапуск", callback_data="admin_restart")],
+    ]
+    
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    await message.answer("👑 Админ-панель:", reply_markup=markup)
+
+@dp.message(Command("add"))
+async def add_to_whitelist(message: Message):
+    """Добавление в whitelist"""
+    if message.from_user.id not in config.ADMIN_IDS:
+        await message.answer("⛔ Только для администраторов")
+        return
+    
+    args = message.text.split()
+    if len(args) < 3:
+        await message.answer("Использование: /add user @username")
+        return
+    
+    username = args[2].replace("@", "")
+    if db.add_to_whitelist(username):
+        await message.answer(f"✅ @{username} добавлен в whitelist")
+    else:
+        await message.answer(f"ℹ️ @{username} уже в whitelist")
+
+# ========== ОБРАБОТКА ФОТО ==========
+@dp.message(F.photo)
+async def process_photo(message: Message):
+    """Обработка фото"""
+    if not PIL_AVAILABLE:
+        await message.answer("❌ Обработка фото недоступна")
+        return
+    
+    try:
+        await message.answer("🔄 Обрабатываю фото...")
+        
+        # Скачиваем фото
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+        photo_bytes = await bot.download_file(file.file_path)
+        
+        # Обрабатываем
+        image = Image.open(BytesIO(photo_bytes.read()))
+        image = image.filter(ImageFilter.SHARPEN)
+        
+        # Простой логотип
+        draw = ImageDraw.Draw(image)
+        try:
+            font = ImageFont.truetype("arial.ttf", 40)
+        except:
+            font = ImageFont.load_default()
+        
+        text = "SARATOV"
+        draw.text((20, 20), text, font=font, fill=(255, 255, 255, 200))
+        
+        # Сохраняем и отправляем
+        output = BytesIO()
+        image.save(output, format='JPEG', quality=90)
+        output.seek(0)
+        
+        await message.answer_photo(
+            types.BufferedInputFile(output.getvalue(), "processed.jpg"),
+            caption="✅ Фото обработано!"
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка обработки фото: {e}")
+        await message.answer("❌ Ошибка обработки")
+
+# ========== ГЕНЕРАЦИЯ ПОСТОВ ==========
+@dp.message(Command("generate_post"))
+async def generate_post_start(message: Message, state: FSMContext):
+    """Генерация поста"""
+    if not GIGACHAT_AVAILABLE or not gigachat_client:
+        await message.answer("❌ Генерация постов недоступна")
+        return
+    
+    await message.answer("📝 Введите тему поста:")
+    await state.set_state(PostStates.waiting_for_topic)
+
+@dp.message(PostStates.waiting_for_topic)
+async def generate_post_process(message: Message, state: FSMContext):
+    """Обработка темы поста"""
+    try:
+        await message.answer("🤖 Генерирую пост...")
+        
+        prompt = f"Напиши пост на тему: {message.text}. Сделай текст интересным и на русском языке."
+        
+        response = gigachat_client.chat(
+            Chat(messages=[Messages(role=MessagesRole.USER, content=prompt)])
+        )
+        
+        post_text = response.choices[0].message.content
+        await message.answer(f"📋 Сгенерированный пост:\n\n{post_text}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка генерации: {e}")
+        await message.answer("❌ Ошибка генерации")
+    
+    await state.clear()
+
+# ========== МЕРОПРИЯТИЯ ==========
+@dp.message(Command("events"))
+async def show_events(message: Message):
+    """Показать мероприятия"""
+    events = db.get_events()
+    
+    if not events:
+        await message.answer("📅 Нет мероприятий")
+        return
+    
+    text = "📅 Мероприятия:\n\n"
+    for event in events[-5:]:
+        text += f"• {event.get('title', 'Без названия')}\n"
+        text += f"  📅 {event.get('date', 'Не указана')}\n"
+        text += f"  📝 {event.get('description', '')[:50]}...\n\n"
+    
+    await message.answer(text)
+
+@dp.message(Command("add_event"))
+async def add_event_start(message: Message, state: FSMContext):
+    """Добавить мероприятие"""
+    await message.answer("📝 Введите название:")
+    await state.set_state(EventStates.waiting_for_title)
+
+@dp.message(EventStates.waiting_for_title)
+async def add_event_title(message: Message, state: FSMContext):
+    """Обработка названия"""
+    await state.update_data(title=message.text)
+    await message.answer("📄 Введите описание:")
+    await state.set_state(EventStates.waiting_for_description)
+
+@dp.message(EventStates.waiting_for_description)
+async def add_event_description(message: Message, state: FSMContext):
+    """Обработка описания"""
+    await state.update_data(description=message.text)
+    await message.answer("📅 Введите дату (ДД.ММ.ГГГГ):")
+    await state.set_state(EventStates.waiting_for_date)
+
+@dp.message(EventStates.waiting_for_date)
+async def add_event_date(message: Message, state: FSMContext):
+    """Обработка даты"""
+    data = await state.get_data()
+    data["date"] = message.text
+    data["creator"] = message.from_user.username or str(message.from_user.id)
+    
+    db.add_event(data)
+    await message.answer("✅ Мероприятие добавлено")
+    await state.clear()
+
+# ========== СМИ ==========
+@dp.message(Command("media"))
+async def search_media(message: Message):
+    """Поиск СМИ"""
+    media_list = db.search_media("")
+    
+    if not media_list:
+        await message.answer("📰 База СМИ пуста")
+        return
+    
+    text = "📰 СМИ Саратова:\n\n"
+    for media in media_list[-10:]:
+        text += f"• {media.get('name', 'Неизвестно')}\n"
+        if media.get('description'):
+            text += f"  {media.get('description')[:60]}...\n"
+        text += "\n"
+    
+    await message.answer(text)
+
+# ========== CALLBACKS ==========
+@dp.callback_query(F.data.startswith("admin_"))
+async def handle_admin_callback(callback: CallbackQuery):
+    """Обработка админ-действий"""
+    action = callback.data
+    
+    if action == "admin_stats":
+        events = len(db.get_events())
+        await callback.message.answer(f"📊 Статистика:\n• Мероприятий: {events}")
+    
+    elif action == "admin_events":
+        await callback.message.answer("📝 Управление событиями:\n/events - список\n/add_event - добавить")
+    
+    elif action == "admin_restart":
+        if not config.BOT_ID:
+            await callback.message.answer("❌ BOT_ID не найден")
+            return
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{config.get_agent_url()}/api/bots/self/restart",
+                    headers={'X-Bot-ID': config.BOT_ID},
+                    timeout=10
+                ) as resp:
+                    result = await resp.json()
+                    if result.get('ok'):
+                        await callback.message.answer("✅ Бот перезапускается...")
+                    else:
+                        await callback.message.answer(f"❌ {result.get('msg')}")
+        except Exception as e:
+            await callback.message.answer(f"❌ Ошибка: {e}")
+    
+    await callback.answer()
