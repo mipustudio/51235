@@ -235,7 +235,7 @@ except ImportError:
 # ========== AIOGRAM ИНИЦИАЛИЗАЦИЯ ==========
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery, InputMediaPhoto
+from aiogram.types import Message, CallbackQuery, InputMediaPhoto, Album
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -340,14 +340,23 @@ async def process_single_photo(photo_bytes: bytes) -> BytesIO:
     
     return output
 
-async def process_multiple_photos(photos: List[Message]) -> List[BytesIO]:
-    """Обработать несколько фото"""
+async def process_photo_album(album: Album) -> List[BytesIO]:
+    """Обработать альбом фото"""
     processed_photos = []
+    photo_count = len(album)
     
-    for i, photo_msg in enumerate(photos[:config.MAX_PHOTOS_PER_BATCH]):
+    logger.info(f"📸 Начинаю обработку альбома из {photo_count} фото")
+    
+    if photo_count > config.MAX_PHOTOS_PER_BATCH:
+        raise ValueError(f"Слишком много фото. Максимум: {config.MAX_PHOTOS_PER_BATCH}")
+    
+    for i, message in enumerate(album.messages):
+        if not message.photo:
+            continue
+            
         try:
-            # Скачиваем фото
-            photo = photo_msg.photo[-1]
+            # Берем самое качественное фото
+            photo = message.photo[-1]
             file = await bot.get_file(photo.file_id)
             photo_bytes = await bot.download_file(file.file_path)
             
@@ -355,10 +364,11 @@ async def process_multiple_photos(photos: List[Message]) -> List[BytesIO]:
             processed = await process_single_photo(photo_bytes.read())
             processed_photos.append(processed)
             
-            logger.info(f"✅ Обработано фото {i+1}/{len(photos)}")
+            logger.info(f"✅ Обработано фото {i+1}/{photo_count}")
             
         except Exception as e:
             logger.error(f"❌ Ошибка обработки фото {i+1}: {e}")
+            continue
     
     return processed_photos
 
@@ -373,7 +383,7 @@ async def start_command(message: Message):
 
 📸 **Обработка фото:**
 - Накладывает логотип в правый верхний угол
-- Поддерживает до 10 фото за раз
+- Поддерживает до 10 фото за раз (альбомом)
 - Сохраняет качество оригинала
 
 ✨ **Другие функции:**
@@ -428,8 +438,14 @@ async def user_photo_callback(callback: CallbackQuery):
     instructions = """
 📸 **Как обработать фото:**
 
-1. **Отправьте одно фото** - будет обработано сразу
-2. **Отправьте несколько фото** (до 10) - все будут обработаны вместе
+**Для одного фото:**
+1. Просто отправьте фото боту
+
+**Для нескольких фото (до 10):**
+1. Откройте галерею
+2. Выберите нужные фото (удерживайте для выбора)
+3. Нажмите "Отправить как альбом"
+4. Бот обработает все фото сразу
 
 ⚡ **Что делает бот:**
 - Накладывает логотип в правый верхний угол
@@ -443,10 +459,10 @@ async def user_photo_callback(callback: CallbackQuery):
     await callback.message.answer(instructions, parse_mode="Markdown")
     await callback.answer()
 
-# ========== ОБРАБОТКА ФОТО С ЛОГОТИПОМ ==========
+# ========== ОБРАБОТКА ОДНОГО ФОТО ==========
 @dp.message(F.photo)
-async def handle_photos(message: Message):
-    """Обработка одного или нескольких фото"""
+async def handle_single_photo(message: Message):
+    """Обработка одного фото (не альбом)"""
     if not PIL_AVAILABLE:
         await message.answer("❌ Обработка фото временно недоступна")
         return
@@ -458,22 +474,11 @@ async def handle_photos(message: Message):
         )
         return
     
-    try:
-        # Проверяем, есть ли групповые фото
-        if message.media_group_id:
-            # Для групповых фото ждем все сообщения
-            await message.answer("🔄 Получаю все фото из группы...")
-            return
-        
-        # Обработка одного фото
-        await process_single_photo_message(message)
-        
-    except Exception as e:
-        logger.error(f"Ошибка обработки фото: {e}")
-        await message.answer("❌ Ошибка при обработке фото")
-
-async def process_single_photo_message(message: Message):
-    """Обработать одно фото"""
+    # Проверяем, является ли это частью альбома
+    if message.media_group_id:
+        # Это часть альбома - обработается в handle_album
+        return
+    
     try:
         await message.answer("🔄 Обрабатываю фото...")
         
@@ -491,42 +496,51 @@ async def process_single_photo_message(message: Message):
             caption="✅ Фото обработано с логотипом!"
         )
         
+        # Показываем меню
+        is_admin = message.from_user.id in config.ADMIN_IDS
+        await message.answer(
+            "Что дальше?",
+            reply_markup=get_user_keyboard(is_admin)
+        )
+        
     except Exception as e:
         logger.error(f"Ошибка обработки одного фото: {e}")
         await message.answer("❌ Ошибка при обработке фото")
 
-@dp.message(F.media_group_id)
-async def handle_media_group(message: Message, album: List[Message] = None):
-    """Обработка группы фото (альбома)"""
+# ========== ОБРАБОТКА АЛЬБОМА (МЕДИА-ГРУППЫ) ==========
+@dp.message(F.media_group_id, F.content_type.in_({'photo'}))
+async def handle_album(message: Message, album: Album = None):
+    """Обработка альбома фото"""
     if not PIL_AVAILABLE or not LOGO_AVAILABLE:
         await message.answer("❌ Обработка фото временно недоступна")
         return
     
     try:
-        # Фильтруем только фото
-        photos = [msg for msg in album if msg.photo]
+        # Проверяем количество фото
+        photo_count = len(album)
         
-        if not photos:
-            await message.answer("❌ В альбоме не найдено фото")
-            return
-        
-        photo_count = len(photos)
         if photo_count > config.MAX_PHOTOS_PER_BATCH:
-            await message.answer(f"❌ Слишком много фото. Максимум: {config.MAX_PHOTOS_PER_BATCH}")
+            await message.answer(
+                f"❌ Слишком много фото.\n"
+                f"Вы отправили: {photo_count}\n"
+                f"Максимум: {config.MAX_PHOTOS_PER_BATCH}\n\n"
+                f"Пожалуйста, отправьте меньше фото."
+            )
             return
         
-        await message.answer(f"🔄 Обрабатываю {photo_count} фото...")
+        # Отправляем уведомление о начале обработки
+        status_msg = await message.answer(f"🔄 Обрабатываю альбом из {photo_count} фото...")
         
-        # Обрабатываем все фото
-        processed_photos = await process_multiple_photos(photos)
+        # Обрабатываем все фото в альбоме
+        processed_photos = await process_photo_album(album)
         
         if not processed_photos:
-            await message.answer("❌ Не удалось обработать ни одного фото")
+            await status_msg.edit_text("❌ Не удалось обработать ни одного фото")
             return
         
         # Отправляем результаты
         if len(processed_photos) == 1:
-            # Одно фото - отправляем как обычно
+            # Одно фото
             await message.answer_photo(
                 types.BufferedInputFile(
                     processed_photos[0].getvalue(), 
@@ -535,7 +549,7 @@ async def handle_media_group(message: Message, album: List[Message] = None):
                 caption="✅ Фото обработано с логотипом!"
             )
         else:
-            # Несколько фото - отправляем медиагруппой
+            # Несколько фото - отправляем как альбом
             media_group = []
             for i, processed in enumerate(processed_photos):
                 media = InputMediaPhoto(
@@ -547,12 +561,28 @@ async def handle_media_group(message: Message, album: List[Message] = None):
                 )
                 media_group.append(media)
             
+            # Отправляем альбом
             await message.answer_media_group(media_group)
+            
+            # Отправляем отдельное сообщение с итогом
             await message.answer(f"✅ Обработано {len(processed_photos)} фото с логотипом!")
         
+        # Удаляем статусное сообщение
+        await status_msg.delete()
+        
+        # Показываем меню
+        is_admin = message.from_user.id in config.ADMIN_IDS
+        await message.answer(
+            "Что дальше?",
+            reply_markup=get_user_keyboard(is_admin)
+        )
+        
+    except ValueError as e:
+        logger.error(f"Ошибка валидации: {e}")
+        await message.answer(f"❌ {str(e)}")
     except Exception as e:
-        logger.error(f"Ошибка обработки группы фото: {e}")
-        await message.answer("❌ Ошибка при обработке группы фото")
+        logger.error(f"Ошибка обработки альбома: {e}")
+        await message.answer("❌ Ошибка при обработке фото")
 
 # ========== ГЕНЕРАЦИЯ ПОСТОВ ==========
 @dp.callback_query(F.data == "user_generate_post")
@@ -626,10 +656,10 @@ async def user_media_callback(callback: CallbackQuery):
     await callback.message.answer(response)
     await callback.answer()
 
-# ========== АДМИН-ДЕЙСТВИЯ (сокращено для краткости) ==========
+# ========== АДМИН-ДЕЙСТВИЯ ==========
 @dp.callback_query(F.data == "admin_stats")
 async def admin_stats_callback(callback: CallbackQuery):
-    stats_text = f"📊 **Статистика:**\n\n• ID бота: {config.BOT_ID}\n• Логотип: {'✅' if LOGO_AVAILABLE else '❌'}"
+    stats_text = f"📊 **Статистика:**\n\n• ID бота: {config.BOT_ID}\n• Логотип: {'✅' if LOGO_AVAILABLE else '❌'}\n• Максимум фото: {config.MAX_PHOTOS_PER_BATCH}"
     await callback.message.answer(stats_text, parse_mode="Markdown")
     await callback.answer()
 
@@ -666,7 +696,7 @@ async def handle_admin_actions(callback: CallbackQuery):
     
     await callback.answer()
 
-# ========== АДМИН КОМАНДЫ (сокращено) ==========
+# ========== АДМИН КОМАНДЫ ==========
 @dp.message(Command("add"))
 async def add_user_command(message: Message):
     if message.from_user.id not in config.ADMIN_IDS:
