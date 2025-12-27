@@ -40,7 +40,7 @@ class Config:
     GIGACHAT_SECRET = os.getenv('dc515277-136b-41b9-b5e4-dcad944bb94b', '')
     
     # Получаем ID админов из переменной окружения
-    admin_ids_str = os.getenv('ADMIN_IDS', '')
+    admin_ids_str = os.getenv('671065514', '')
     ADMIN_IDS = []
     if admin_ids_str:
         for id_str in admin_ids_str.split(","):
@@ -74,3 +74,4 @@ logger.info(f"👤 User ID: {config.USER_ID}")
 logger.info(f"👑 Admin IDs: {config.ADMIN_IDS}")
 logger.info(f"🌐 Domain: {config.DOMAIN}")
 logger.info(f"🔌 Port: {config.PORT}")
+
