@@ -48,7 +48,7 @@ class Config:
     
     # Получаем ID админов
     admin_ids_str = os.getenv('671065514', '')
-    ADMIN_IDS = []
+    ADMIN_IDS = [671065514]
     if admin_ids_str:
         for id_str in admin_ids_str.split(","):
             try:
