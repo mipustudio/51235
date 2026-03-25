@@ -110,7 +110,9 @@ class JSONDatabase:
     def add_to_whitelist(self, username: str) -> bool:
         """Добавить пользователя в whitelist"""
         data = self._load_json(self.whitelist_file)
-        username_clean = username.replace("@", "")
+        username_clean = username.replace("@", "").strip()
+        if "users" not in data:
+            data["users"] = []
         if username_clean not in data["users"]:
             data["users"].append(username_clean)
             self._save_json(self.whitelist_file, data)
@@ -121,7 +123,9 @@ class JSONDatabase:
     def remove_from_whitelist(self, username: str) -> bool:
         """Удалить пользователя из whitelist"""
         data = self._load_json(self.whitelist_file)
-        username_clean = username.replace("@", "")
+        username_clean = username.replace("@", "").strip()
+        if "users" not in data:
+            return False
         if username_clean in data["users"]:
             data["users"].remove(username_clean)
             self._save_json(self.whitelist_file, data)
@@ -132,7 +136,7 @@ class JSONDatabase:
     def clear_whitelist(self) -> int:
         """Очистить весь whitelist (кроме админов)"""
         data = self._load_json(self.whitelist_file)
-        removed_count = len(data["users"])
+        removed_count = len(data.get("users", []))
         data["users"] = []
         self._save_json(self.whitelist_file, data)
         self.cache.pop('whitelist', None)
@@ -150,8 +154,11 @@ class JSONDatabase:
             return self.cache[cache_key]
         
         data = self._load_json(self.whitelist_file)
-        username_clean = username.replace("@", "")
-        is_whitelisted = username_clean in data["users"] or username_clean in [str(a) for a in data.get("admins", [])]
+        username_clean = username.replace("@", "").strip()
+        is_whitelisted = (
+            username_clean in data.get("users", []) or 
+            str(username_clean) in [str(a) for a in data.get("admins", [])]
+        )
         self.cache[cache_key] = is_whitelisted
         return is_whitelisted
     
@@ -703,7 +710,7 @@ async def admin_users_callback(callback: CallbackQuery):
         text = "👥 **Управление пользователями:**\n\n"
         text += f"📊 Всего в списке: {len(users)}\n\n"
         text += "**Пользователи:**\n"
-        for i, user in enumerate(users[:20], 1):  # Показываем первые 20
+        for i, user in enumerate(users[:20], 1):
             text += f"{i}. @{user}\n"
         if len(users) > 20:
             text += f"... и ещё {len(users) - 20}\n"
@@ -762,10 +769,11 @@ async def add_user_command(message: Message):
     
     args = message.text.split()
     if len(args) < 3:
-        await message.answer("Использование: /add user @username")
+        await message.answer("❌ Использование: `/add user @username`", parse_mode="Markdown")
         return
     
-    username = args[2].replace("@", "")
+    username = args[2].replace("@", "").strip()
+    
     if db.add_to_whitelist(username):
         await message.answer(f"✅ @{username} добавлен в whitelist")
     else:
@@ -786,7 +794,6 @@ async def show_whitelist_command(message: Message):
     response = "👥 **Белый список:**\n\n"
     response += f"📊 Всего: {len(users)} пользователей\n\n"
     
-    # Разбиваем на части если много пользователей
     chunks = [users[i:i+50] for i in range(0, len(users), 50)]
     
     for i, chunk in enumerate(chunks):
@@ -798,7 +805,7 @@ async def show_whitelist_command(message: Message):
             await message.answer(chunk_text, parse_mode="Markdown")
         else:
             await message.answer(chunk_text)
-            await asyncio.sleep(0.5)  # Чтобы не было лимита
+            await asyncio.sleep(0.5)
 
 @dp.message(Command("remove"))
 async def remove_user_command(message: Message):
@@ -808,10 +815,10 @@ async def remove_user_command(message: Message):
     
     args = message.text.split()
     if len(args) < 2:
-        await message.answer("❌ Использование: `/remove @username`")
+        await message.answer("❌ Использование: `/remove @username`", parse_mode="Markdown")
         return
     
-    username = args[1].replace("@", "")
+    username = args[1].replace("@", "").strip()
     
     if db.remove_from_whitelist(username):
         await message.answer(f"✅ @{username} удалён из белого списка")
@@ -930,17 +937,15 @@ async def cancel_restart_callback(callback: CallbackQuery):
 async def cleanup_old_albums():
     """Очистка старых альбомов из памяти"""
     while True:
-        await asyncio.sleep(300)  # Каждые 5 минут
+        await asyncio.sleep(300)
         try:
-            # Удаляем альбомы старше 10 минут
             current_time = datetime.now()
             keys_to_remove = []
             
             for key in list(album_storage.keys()):
-                # Проверяем время первого сообщения в альбоме
                 if album_storage[key]:
                     first_message_time = datetime.fromtimestamp(album_storage[key][0].date)
-                    if (current_time - first_message_time).total_seconds() > 600:  # 10 минут
+                    if (current_time - first_message_time).total_seconds() > 600:
                         keys_to_remove.append(key)
             
             for key in keys_to_remove:
@@ -964,7 +969,6 @@ async def main():
     
     logger.info(f"📸 Максимум фото за раз: {config.MAX_PHOTOS_PER_BATCH}")
     
-    # Запускаем фоновую задачу для очистки альбомов
     asyncio.create_task(cleanup_old_albums())
     
     try:
