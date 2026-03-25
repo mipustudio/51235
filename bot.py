@@ -108,25 +108,55 @@ class JSONDatabase:
                     json.dump(default_data, f, ensure_ascii=False, indent=2)
     
     def add_to_whitelist(self, username: str) -> bool:
+        """Добавить пользователя в whitelist"""
         data = self._load_json(self.whitelist_file)
-        if username not in data["users"]:
-            data["users"].append(username)
+        username_clean = username.replace("@", "")
+        if username_clean not in data["users"]:
+            data["users"].append(username_clean)
             self._save_json(self.whitelist_file, data)
             self.cache.pop('whitelist', None)
             return True
         return False
     
+    def remove_from_whitelist(self, username: str) -> bool:
+        """Удалить пользователя из whitelist"""
+        data = self._load_json(self.whitelist_file)
+        username_clean = username.replace("@", "")
+        if username_clean in data["users"]:
+            data["users"].remove(username_clean)
+            self._save_json(self.whitelist_file, data)
+            self.cache.pop('whitelist', None)
+            return True
+        return False
+    
+    def clear_whitelist(self) -> int:
+        """Очистить весь whitelist (кроме админов)"""
+        data = self._load_json(self.whitelist_file)
+        removed_count = len(data["users"])
+        data["users"] = []
+        self._save_json(self.whitelist_file, data)
+        self.cache.pop('whitelist', None)
+        return removed_count
+    
+    def get_whitelist_users(self) -> List[str]:
+        """Получить список всех пользователей в whitelist"""
+        data = self._load_json(self.whitelist_file)
+        return data.get("users", [])
+    
     def is_whitelisted(self, username: str) -> bool:
+        """Проверить, находится ли пользователь в whitelist"""
         cache_key = f'whitelist_{username}'
         if cache_key in self.cache:
             return self.cache[cache_key]
         
         data = self._load_json(self.whitelist_file)
-        is_whitelisted = username in data["users"] or username in data["admins"]
+        username_clean = username.replace("@", "")
+        is_whitelisted = username_clean in data["users"] or username_clean in [str(a) for a in data.get("admins", [])]
         self.cache[cache_key] = is_whitelisted
         return is_whitelisted
     
     def add_event(self, event_data: Dict) -> str:
+        """Добавить мероприятие"""
         data = self._load_json(self.events_file)
         event_id = str(len(data["events"]) + 1)
         event_data["id"] = event_id
@@ -137,6 +167,7 @@ class JSONDatabase:
         return event_id
     
     def get_events(self) -> List[Dict]:
+        """Получить все мероприятия"""
         if 'events' in self.cache:
             return self.cache['events']
         
@@ -145,6 +176,7 @@ class JSONDatabase:
         return data["events"]
     
     def delete_event(self, event_id: str) -> bool:
+        """Удалить мероприятие по ID"""
         data = self._load_json(self.events_file)
         initial_len = len(data["events"])
         data["events"] = [e for e in data["events"] if e["id"] != event_id]
@@ -156,12 +188,14 @@ class JSONDatabase:
         return False
     
     def add_media(self, media_data: Dict) -> None:
+        """Добавить СМИ"""
         data = self._load_json(self.media_file)
         data["media"].append(media_data)
         self._save_json(self.media_file, data)
         self.cache.pop('media', None)
     
     def search_media(self, query: str = "") -> List[Dict]:
+        """Поиск СМИ"""
         if 'media' not in self.cache:
             data = self._load_json(self.media_file)
             self.cache['media'] = data["media"]
@@ -175,8 +209,9 @@ class JSONDatabase:
             if query in media.get("name", "").lower() 
             or query in media.get("description", "").lower()
         ]
-
+    
     def _load_json(self, filepath: str) -> Dict:
+        """Загрузить JSON файл"""
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 return json.load(f)
@@ -184,6 +219,7 @@ class JSONDatabase:
             return {}
     
     def _save_json(self, filepath: str, data: Dict) -> None:
+        """Сохранить JSON файл"""
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -199,7 +235,6 @@ LOGO_POSITION = (20, 20)  # Правый верхний угол с отступ
 try:
     from PIL import Image
     PIL_AVAILABLE = True
-    
     # Пробуем загрузить логотип
     if os.path.exists("logo.png"):
         try:
@@ -212,7 +247,6 @@ try:
             logger.error(f"❌ Ошибка загрузки логотипа: {e}")
     else:
         logger.warning("⚠️ Файл logo.png не найден")
-        
 except ImportError:
     logger.warning("⚠️ Pillow не установлен")
 
@@ -224,7 +258,6 @@ try:
     from gigachat import GigaChat
     from gigachat.models import Chat, Messages, MessagesRole
     GIGACHAT_AVAILABLE = True
-    
     try:
         gigachat_client = GigaChat(
             credentials=config.GIGACHAT_SECRET,
@@ -234,7 +267,6 @@ try:
         logger.info("✅ GigaChat клиент инициализирован")
     except Exception as e:
         logger.error(f"❌ Ошибка GigaChat: {e}")
-        
 except ImportError:
     logger.warning("⚠️ GigaChat не установлен")
 
@@ -252,6 +284,7 @@ dp = Dispatcher(storage=MemoryStorage())
 # ========== СОСТОЯНИЯ (FSM) ==========
 class PostStates(StatesGroup):
     waiting_for_topic = State()
+    waiting_for_clear_confirm = State()
 
 class EventStates(StatesGroup):
     waiting_for_title = State()
@@ -288,7 +321,6 @@ def get_user_keyboard(is_admin: bool = False):
         [types.InlineKeyboardButton(text="📅 Мероприятия", callback_data="user_events")],
         [types.InlineKeyboardButton(text="📰 СМИ Саратова", callback_data="user_media")],
     ]
-    
     if is_admin:
         keyboard.append([types.InlineKeyboardButton(text="👑 Админ-панель", callback_data="admin_panel")])
     
@@ -304,7 +336,6 @@ def get_admin_keyboard():
         [types.InlineKeyboardButton(text="🔄 Перезапуск бота", callback_data="admin_restart")],
         [types.InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="user_menu")],
     ]
-    
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # ========== ФУНКЦИИ ОБРАБОТКИ ФОТО ==========
@@ -477,15 +508,6 @@ async def handle_photo_message(message: Message):
         album_storage[message.media_group_id].append(message)
         
         # Ждем некоторое время, чтобы собрать все фото альбома
-        # На практике Telegram отправляет все фото альбома почти одновременно
-        current_album = album_storage[message.media_group_id]
-        
-        # Если альбом уже собран (все фото получены)
-        # Здесь можно добавить таймаут или другой механизм определения завершения альбома
-        # Для простоты считаем, что если получили первое фото, то ждем немного
-        
-        # Создаем задачу для обработки альбома через 1.5 секунды
-        # Это дает время получить все фото альбома
         await asyncio.sleep(1.5)
         
         # Проверяем, не обработали ли уже этот альбом
@@ -507,22 +529,20 @@ async def handle_photo_message(message: Message):
 async def start_command(message: Message):
     """Команда /start"""
     is_admin = message.from_user.id in config.ADMIN_IDS
-    
     welcome_text = """
 🤖 **Бот для обработки фото и создания контента**
 
 📸 **Обработка фото:**
-- Накладывает логотип в правый верхний угол
-- Поддерживает до 10 фото за раз (альбомом)
-- Сохраняет качество оригинала
+• Накладывает логотип в правый верхний угол
+• Поддерживает до 10 фото за раз (альбомом)
+• Сохраняет качество оригинала
 
 ✨ **Другие функции:**
-- Создание постов через AI
-- Управление мероприятиями
-- База СМИ Саратова
+• Создание постов через AI
+• Управление мероприятиями
+• База СМИ Саратова
 
-👇 **Выберите действие:**
-"""
+👇 Выберите действие:"""
     
     await message.answer(
         welcome_text,
@@ -569,7 +589,7 @@ async def user_photo_callback(callback: CallbackQuery):
 📸 **Как обработать фото:**
 
 **Для одного фото:**
-1. Просто отправьте фото боту
+Просто отправьте фото боту
 
 **Для нескольких фото (до 10):**
 1. Откройте галерею в Telegram
@@ -578,13 +598,12 @@ async def user_photo_callback(callback: CallbackQuery):
 4. Бот автоматически определит альбом и обработает все фото
 
 ⚡ **Что делает бот:**
-- Накладывает логотип в правый верхний угол
-- Автоматически подбирает размер логотипа
-- Сохраняет оригинальное качество
-- Поддерживает PNG и JPEG
+• Накладывает логотип в правый верхний угол
+• Автоматически подбирает размер логотипа
+• Сохраняет оригинальное качество
+• Поддерживает PNG и JPEG
 
-👇 **Просто отправьте фото(а) сейчас:**
-"""
+👇 Просто отправьте фото(а) сейчас:"""
     
     await callback.message.answer(instructions, parse_mode="Markdown")
     await callback.answer()
@@ -664,8 +683,45 @@ async def user_media_callback(callback: CallbackQuery):
 # ========== АДМИН-ДЕЙСТВИЯ ==========
 @dp.callback_query(F.data == "admin_stats")
 async def admin_stats_callback(callback: CallbackQuery):
-    stats_text = f"📊 **Статистика:**\n\n• ID бота: {config.BOT_ID}\n• Логотип: {'✅' if LOGO_AVAILABLE else '❌'}\n• Максимум фото: {config.MAX_PHOTOS_PER_BATCH}"
+    """Показать статистику"""
+    stats_text = f"📊 Статистика:\n\n• ID бота: {config.BOT_ID}\n• Логотип: {'✅' if LOGO_AVAILABLE else '❌'}\n• Максимум фото: {config.MAX_PHOTOS_PER_BATCH}"
     await callback.message.answer(stats_text, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_users")
+async def admin_users_callback(callback: CallbackQuery):
+    """Показать управление пользователями"""
+    if callback.from_user.id not in config.ADMIN_IDS:
+        await callback.answer("⛔ Доступ запрещен")
+        return
+    
+    users = db.get_whitelist_users()
+    
+    if not users:
+        text = "👥 **Управление пользователями:**\n\n📭 В белом списке нет пользователей.\n\n"
+    else:
+        text = "👥 **Управление пользователями:**\n\n"
+        text += f"📊 Всего в списке: {len(users)}\n\n"
+        text += "**Пользователи:**\n"
+        for i, user in enumerate(users[:20], 1):  # Показываем первые 20
+            text += f"{i}. @{user}\n"
+        if len(users) > 20:
+            text += f"... и ещё {len(users) - 20}\n"
+        text += "\n"
+    
+    text += "**Команды:**\n"
+    text += "• `/add user @username` — добавить\n"
+    text += "• `/remove @username` — удалить\n"
+    text += "• `/clear_whitelist` — очистить всех\n"
+    text += "• `/whitelist` — показать список\n"
+    
+    keyboard = [
+        [types.InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_users")],
+        [types.InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]
+    ]
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    await callback.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("admin_"))
@@ -673,11 +729,7 @@ async def handle_admin_actions(callback: CallbackQuery):
     """Обработка остальных админ-действий"""
     action = callback.data
     
-    if action == "admin_users":
-        text = "👥 **Управление пользователями:**\n\nИспользуйте команды:\n• `/add user @username`\n• `/list_users`"
-        await callback.message.answer(text, parse_mode="Markdown")
-    
-    elif action == "admin_events":
+    if action == "admin_events":
         text = "📝 **Управление мероприятиями:**\n\nКоманды:\n• `/add_event`\n• `/events`\n• `/delete_event <id>`"
         await callback.message.answer(text, parse_mode="Markdown")
     
@@ -704,6 +756,7 @@ async def handle_admin_actions(callback: CallbackQuery):
 # ========== АДМИН КОМАНДЫ ==========
 @dp.message(Command("add"))
 async def add_user_command(message: Message):
+    """Добавить пользователя в whitelist"""
     if message.from_user.id not in config.ADMIN_IDS:
         return
     
@@ -718,8 +771,87 @@ async def add_user_command(message: Message):
     else:
         await message.answer(f"ℹ️ @{username} уже в whitelist")
 
+@dp.message(Command("whitelist"))
+async def show_whitelist_command(message: Message):
+    """Показать весь белый список"""
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+    
+    users = db.get_whitelist_users()
+    
+    if not users:
+        await message.answer("📭 В белом списке нет пользователей.")
+        return
+    
+    response = "👥 **Белый список:**\n\n"
+    response += f"📊 Всего: {len(users)} пользователей\n\n"
+    
+    # Разбиваем на части если много пользователей
+    chunks = [users[i:i+50] for i in range(0, len(users), 50)]
+    
+    for i, chunk in enumerate(chunks):
+        chunk_text = response
+        for user in chunk:
+            chunk_text += f"• @{user}\n"
+        
+        if i == 0:
+            await message.answer(chunk_text, parse_mode="Markdown")
+        else:
+            await message.answer(chunk_text)
+            await asyncio.sleep(0.5)  # Чтобы не было лимита
+
+@dp.message(Command("remove"))
+async def remove_user_command(message: Message):
+    """Удалить пользователя из whitelist"""
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+    
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("❌ Использование: `/remove @username`")
+        return
+    
+    username = args[1].replace("@", "")
+    
+    if db.remove_from_whitelist(username):
+        await message.answer(f"✅ @{username} удалён из белого списка")
+    else:
+        await message.answer(f"ℹ️ @{username} не найден в белом списке")
+
+@dp.message(Command("clear_whitelist"))
+async def clear_whitelist_command(message: Message, state: FSMContext):
+    """Очистить весь белый список"""
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+    
+    await state.set_state(PostStates.waiting_for_clear_confirm)
+    await message.answer(
+        "⚠️ **Вы уверены, что хотите очистить весь белый список?**\n\n"
+        "Это действие нельзя отменить!\n\n"
+        "Отправьте `ДА` для подтверждения или `ОТМЕНА` для отмены.",
+        parse_mode="Markdown"
+    )
+
+@dp.message(PostStates.waiting_for_clear_confirm)
+async def confirm_clear_whitelist(message: Message, state: FSMContext):
+    """Подтверждение очистки whitelist"""
+    if message.from_user.id not in config.ADMIN_IDS:
+        await state.clear()
+        return
+    
+    text = message.text.strip().upper()
+    
+    if text in ["ДА", "YES", "Y"]:
+        removed_count = db.clear_whitelist()
+        await message.answer(f"✅ Белый список очищен! Удалено пользователей: {removed_count}")
+    else:
+        await message.answer("❌ Очистка отменена.")
+    
+    await state.clear()
+
 @dp.message(Command("add_event"))
 async def add_event_start(message: Message, state: FSMContext):
+    """Добавить мероприятие"""
     if message.from_user.id not in config.ADMIN_IDS:
         return
     
@@ -743,13 +875,13 @@ async def process_event_date(message: Message, state: FSMContext):
     data = await state.get_data()
     data["date"] = message.text
     data["creator"] = message.from_user.username or str(message.from_user.id)
-    
     event_id = db.add_event(data)
     await message.answer(f"✅ Мероприятие добавлено! ID: {event_id}")
     await state.clear()
 
 @dp.message(Command("events"))
 async def show_events_command(message: Message):
+    """Показать все мероприятия"""
     events = db.get_events()
     
     if not events:
@@ -766,6 +898,7 @@ async def show_events_command(message: Message):
 # ========== ПЕРЕЗАПУСК БОТА ==========
 @dp.callback_query(F.data == "confirm_restart")
 async def confirm_restart_callback(callback: CallbackQuery):
+    """Подтверждение перезапуска"""
     try:
         await callback.message.edit_text("🔄 Перезапускаю...")
         
@@ -789,6 +922,7 @@ async def confirm_restart_callback(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "cancel_restart")
 async def cancel_restart_callback(callback: CallbackQuery):
+    """Отмена перезапуска"""
     await callback.message.edit_text("❌ Перезапуск отменен.")
     await callback.answer()
 
@@ -824,7 +958,7 @@ async def main():
     
     if LOGO_AVAILABLE:
         logger.info(f"✅ Логотип загружен: {logo_image.size}")
-        logger.info(f"⚙️  Масштаб логотипа: {LOGO_SCALE*100}% от ширины фото")
+        logger.info(f"⚙️ Масштаб логотипа: {LOGO_SCALE*100}% от ширины фото")
     else:
         logger.warning("⚠️ Логотип не загружен - обработка фото недоступна")
     
